@@ -30,11 +30,13 @@ with st.sidebar:
     st.markdown("---")
 
     st.subheader("Schemes to Compare")
-    #show_exact = st.checkbox("Exact Solution", value=True)
+    show_exact = st.checkbox("Exact Solution", value=True)
     show_fecs = st.checkbox("Forward Euler Centered", value=True)
     show_upwind = st.checkbox("Upwind", value=True)
     show_leapfrog = st.checkbox("Leapfrog", value=True)
     show_lw = st.checkbox("Lax-Wendroff", value=True)
+    show_cn = st.checkbox("Crank-Nicolson (CN)", value=True)
+    show_be = st.checkbox("Backward Euler (BE)", value=True)
 
     st.subheader("Shape Parameters")
     sigma = st.slider("Sigma (Gaussian/Cosine)", 0.01, 0.5, 0.05)
@@ -60,6 +62,16 @@ u0 = get_initial_condition(x, wave_shape, sigma, x0, L)
 
 solvers = {}
 integrals = {}
+
+if show_exact:
+    u_exact_all = []
+    for n in range(Nt + 1):
+        t_n = n * dt
+        center_t = (x0 + v * t_n) % L 
+        u_exact_n = get_initial_condition(x, wave_shape, sigma, center_t, L)
+        u_exact_all.append(u_exact_n)
+    solvers["Exact"] = u_exact_all
+    integrals["Exact"] = [np.sum(u0) * dx] * (Nt + 1)
 
 if show_fecs:
     u = u0.copy()
@@ -114,11 +126,69 @@ if show_lw:
     solvers["Lax-Wendroff"] = u_all
     integrals["Lax-Wendroff"] = mass
 
+if show_be:
+    u = u0.copy()
+    u_all = [u.copy()]
+    mass = [np.sum(u) * dx]
+    A_be = np.zeros((Nx, Nx))
+    np.fill_diagonal(A_be, 1.0)
+    np.fill_diagonal(A_be[0:, 1:], C / 2.0)
+    np.fill_diagonal(A_be[1:, 0:], -C / 2.0)
+    A_be[0, -1] = -C / 2.0
+    A_be[-1, 0] = C / 2.0
+    
+    for n in range(Nt):
+        b = u.copy()
+        u_next = np.linalg.solve(A_be, b)
+        u = u_next
+        u_all.append(u.copy())
+        mass.append(np.sum(u) * dx)
+    solvers["Backward Euler"] = u_all
+    integrals["Backward Euler"] = mass
+
+if show_cn:
+    u = u0.copy()
+    u_all = [u.copy()]
+    mass = [np.sum(u) * dx]
+    A_cn = np.zeros((Nx, Nx))
+    np.fill_diagonal(A_cn, 1.0)
+    np.fill_diagonal(A_cn[0:, 1:], C / 4.0)
+    np.fill_diagonal(A_cn[1:, 0:], -C / 4.0)
+    A_cn[0, -1] = -C / 4.0
+    A_cn[-1, 0] = C / 4.0
+    
+    for n in range(Nt):
+        b = u - (C / 4.0) * (np.roll(u, -1) - np.roll(u, 1))
+        u_next = np.linalg.solve(A_cn, b)
+        u = u_next
+        u_all.append(u.copy())
+        mass.append(np.sum(u) * dx)
+    solvers["Crank-Nicolson"] = u_all
+    integrals["Crank-Nicolson"] = mass
+
 
 fig_anim = go.Figure()
 
-colors = {"Exact": "black", "FECS": "red", "Upwind": "blue", "Leapfrog": "green", "Lax-Wendroff": "orange"}
-dash = {"Exact": "solid", "FECS": "dash", "Upwind": "dot", "Leapfrog": "dashdot", "Lax-Wendroff": "longdash"}
+colors = {
+    "Exact": "black", 
+    "FECS": "red", 
+    "Upwind": "blue",
+    "Leapfrog": "green", 
+    "Lax-Wendroff": "orange",
+    "Crank-Nicolson": "purple",
+    "Backward Euler": "brown"
+}
+
+dash = {
+    "Exact": "solid", 
+    "FECS": "dash", 
+    "Upwind": "dot", 
+    "Leapfrog": "dashdot", 
+    "Lax-Wendroff": "longdash",
+    "Crank-Nicolson": "dot",
+    "Backward Euler": "dashdot"
+}
+
 for name, data in solvers.items():
     fig_anim.add_trace(go.Scatter(
         x=x, 
@@ -169,3 +239,32 @@ if len(solvers) > 0:
         )
 
         st.plotly_chart(fig_heatmap, use_container_width=True)
+
+if len(integrals) > 0:
+    st.markdown("---")
+    st.header("Mass conservation (Integral)")
+    st.write("This plot shows the total integral of $u(x,t)$ over time. Ideally, it should remain constant.")
+
+    fig_mass = go.Figure()
+    t_vals = np.linspace(0, T_max, Nt + 1)
+
+    first_solver_name = list(integrals.keys())[0]
+    initial_mass = integrals[first_solver_name][0]
+
+    for name, mass_data in integrals.items():
+        fig_mass.add_trace(go.Scatter(
+            x=t_vals, 
+            y=mass_data, 
+            mode="lines", 
+            name=name,
+            line=dict(color=colors.get(name, "gray"), dash=dash.get(name, "solid"))
+        ))
+
+    fig_mass.update_layout(
+        title="Change in total mass over time",
+        xaxis_title="Time (t)",
+        yaxis_title="Total mass",
+        # Set y-axis range relative to initial mass to see small changes
+        yaxis=dict(range=[initial_mass * 0.95, initial_mass * 1.05]) 
+    )
+    st.plotly_chart(fig_mass, use_container_width=True)
