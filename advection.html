@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Advection Simulator: Factory Plume</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1a1a1a;
+            color: #eee;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+        h2 { margin-bottom: 5px; }
+        .container {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        canvas {
+            background-color: #000;
+            border: 2px solid #444;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            cursor: crosshair;
+        }
+        .controls {
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            width: 300px;
+            border: 1px solid #444;
+        }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 0.9em; }
+        input[type=range] { width: 100%; }
+        .value-display { float: right; color: #4CAF50; }
+        .legend {
+            margin-top: 20px;
+            display: flex;
+            align-items: center;
+            font-size: 0.8em;
+        }
+        .gradient-bar {
+            width: 100%;
+            height: 10px;
+            background: linear-gradient(to right, black, blue, cyan, lime, yellow, red);
+            margin-top: 5px;
+        }
+        .info { font-size: 0.8rem; color: #aaa; margin-top: 10px; line-height: 1.4; }
+    </style>
+</head>
+<body>
+
+    <h2>Advection Simulator: Industrial Plume</h2>
+    <p style="color:#aaa; margin-bottom: 20px;">Visualize how wind velocity transports scalar density (smoke/gas).</p>
+
+    <div class="container">
+        <div style="position: relative;">
+            <canvas id="simCanvas" width="600" height="400"></canvas>
+            <div style="position: absolute; bottom: 10px; left: 10px; color: white; font-size: 12px; background: rgba(0,0,0,0.5); padding: 4px;">
+                Factory Source (Fixed)
+            </div>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <label>Horizontal Wind Speed (u) <span id="val-u" class="value-display">2.0</span></label>
+                <input type="range" id="slider-u" min="-5" max="10" step="0.1" value="2.0">
+            </div>
+
+            <div class="control-group">
+                <label>Vertical Wind Speed (v) <span id="val-v" class="value-display">0.5</span></label>
+                <input type="range" id="slider-v" min="-5" max="5" step="0.1" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>Source Emission Rate <span id="val-dens" class="value-display">100</span></label>
+                <input type="range" id="slider-dens" min="0" max="255" step="1" value="100">
+            </div>
+            
+            <div class="control-group">
+                <button onclick="resetSim()" style="padding: 8px 16px; background: #d32f2f; color: white; border: none; border-radius: 4px; cursor: pointer; width: 100%;">Clear Sky</button>
+            </div>
+
+            <div class="legend">
+                <div style="width: 100%;">
+                    <span>Concentration Level:</span>
+                    <div class="gradient-bar"></div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span>Low</span><span>High</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info">
+                <strong>The Math:</strong> This simulates the equation:<br>
+                ∂φ/∂t + <strong>u</strong> · ∇φ = 0<br><br>
+                The "smoke" (φ) is purely transported by the wind vector <strong>u</strong>. Note how changing the wind changes the plume angle instantly.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false }); // Optimization
+        const scale = 4; // Resolution scale (lower = blockier but faster)
+        const width = canvas.width / scale;
+        const height = canvas.height / scale;
+
+        // --- State Arrays ---
+        // We use two arrays: one for current state, one for next state
+        let density = new Float32Array(width * height).fill(0);
+        let density_prev = new Float32Array(width * height).fill(0);
+
+        // --- Parameters ---
+        let u = 2.0; // Velocity X
+        let v = 0.5; // Velocity Y
+        let sourceIntensity = 100;
+        const dt = 1.0; // Time step
+        const decay = 0.99; // Slight decay to simulate dispersion into 3D air
+
+        // --- UI Handlers ---
+        const sliderU = document.getElementById('slider-u');
+        const sliderV = document.getElementById('slider-v');
+        const sliderDens = document.getElementById('slider-dens');
+        const valU = document.getElementById('val-u');
+        const valV = document.getElementById('val-v');
+        const valDens = document.getElementById('val-dens');
+
+        sliderU.oninput = function() { u = parseFloat(this.value); valU.innerText = u.toFixed(1); };
+        sliderV.oninput = function() { v = parseFloat(this.value); valV.innerText = v.toFixed(1); };
+        sliderDens.oninput = function() { sourceIntensity = parseInt(this.value); valDens.innerText = sourceIntensity; };
+
+        function resetSim() {
+            density.fill(0);
+            density_prev.fill(0);
+        }
+
+        // --- Core Physics: Advection Step ---
+        // Uses a Backtracing (Semi-Lagrangian) method for stability
+        function advect() {
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    // 1. Where did the particle come from? (Backtrace)
+                    // We look backwards along the velocity vector
+                    let x_prev = x - u * dt;
+                    let y_prev = y - v * dt;
+
+                    // 2. Boundary checks
+                    if (x_prev < 0) x_prev = 0;
+                    if (x_prev > width - 1) x_prev = width - 1;
+                    if (y_prev < 0) y_prev = 0;
+                    if (y_prev > height - 1) y_prev = height - 1;
+
+                    // 3. Bilinear Interpolation
+                    // Since (x_prev, y_prev) is likely between grid cells, we mix the 4 surrounding values
+                    const x0 = Math.floor(x_prev);
+                    const x1 = x0 + 1;
+                    const y0 = Math.floor(y_prev);
+                    const y1 = y0 + 1;
+                    
+                    const s1 = x_prev - x0;
+                    const s0 = 1 - s1;
+                    const t1 = y_prev - y0;
+                    const t0 = 1 - t1;
+
+                    // Safe array indexing
+                    const i00 = y0 * width + x0;
+                    const i01 = y1 * width + x0;
+                    const i10 = y0 * width + x1;
+                    const i11 = y1 * width + x1;
+
+                    // Check bounds for interpolation neighbors
+                    // (Simplified clamping handled by using Math.min/max if needed, 
+                    // but backtrace clamping above covers most edge cases)
+                    
+                    let d00 = density[Math.min(density.length-1, i00)];
+                    let d01 = density[Math.min(density.length-1, i01)];
+                    let d10 = density[Math.min(density.length-1, i10)];
+                    let d11 = density[Math.min(density.length-1, i11)];
+
+                    // Interpolate
+                    const val = s0 * (t0 * d00 + t1 * d01) +
+                                s1 * (t0 * d10 + t1 * d11);
+
+                    // 4. Update new state
+                    density_prev[y * width + x] = val * decay;
+                }
+            }
+
+            // Swap arrays
+            let temp = density;
+            density = density_prev;
+            density_prev = temp;
+        }
+
+        function addSource() {
+            // Add smoke at a fixed point (The Factory Stack)
+            // Location: Left side, middle height
+            const sourceX = Math.floor(width * 0.1); 
+            const sourceY = Math.floor(height * 0.5);
+            const radius = 3;
+
+            for(let y = -radius; y <= radius; y++) {
+                for(let x = -radius; x <= radius; x++) {
+                    if (x*x + y*y <= radius*radius) {
+                        const idx = (sourceY + y) * width + (sourceX + x);
+                        if(idx >= 0 && idx < density.length) {
+                            density[idx] = Math.min(255, density[idx] + sourceIntensity); 
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Rendering ---
+        // Color mapping: Black -> Blue -> Cyan -> Green -> Yellow -> Red
+        function getColor(val) {
+            if (val < 1) return [0,0,0];
+            // Simple heatmap logic
+            const n = val / 255;
+            const r = Math.min(255, Math.max(0, (n - 0.5) * 2 * 255));
+            const g = Math.min(255, Math.max(0, Math.sin(n * Math.PI) * 255));
+            const b = Math.min(255, Math.max(0, (0.5 - n) * 2 * 255));
+            return [r, g, b];
+        }
+
+        const imgData = ctx.createImageData(width * scale, height * scale); // Full res buffer
+
+        function draw() {
+            // Draw the factory (simple grey rectangle)
+            const sX = Math.floor(width * 0.1) * scale;
+            const sY = Math.floor(height * 0.5) * scale;
+
+            // To render, we scale up the low-res simulation grid to the canvas
+            // We do a manual nearest-neighbor scale for the visualization
+            const data = imgData.data;
+            
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const dVal = density[y * width + x];
+                    const [r, g, b] = getColor(dVal);
+
+                    // Fill the scaled block
+                    for (let dy = 0; dy < scale; dy++) {
+                        for (let dx = 0; dx < scale; dx++) {
+                            const pxIndex = ((y * scale + dy) * (width * scale) + (x * scale + dx)) * 4;
+                            data[pxIndex] = r;
+                            data[pxIndex + 1] = g;
+                            data[pxIndex + 2] = b;
+                            data[pxIndex + 3] = 255; // Alpha
+                        }
+                    }
+                }
+            }
+            
+            ctx.putImageData(imgData, 0, 0);
+
+            // Overlay: Factory structure
+            ctx.fillStyle = "#555";
+            ctx.fillRect(sX - 10, sY + 10, 20, 200); // Chimney stack
+            ctx.fillStyle = "#333";
+            ctx.fillRect(sX - 30, sY + 100, 60, 100); // Building
+        }
+
+        // --- Main Loop ---
+        function loop() {
+            addSource();
+            advect();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        loop();
+
+    </script>
+</body>
+</html>
