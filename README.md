@@ -88,9 +88,5 @@ This project demonstrates the behavior of different discretization strategies:
 
 ## Authors
 
-* **Fernando Blanco**
-* **Hugo Sánchez**
-
-## License
-
-This project is open-source and available for educational purposes.
+* Fernando Blanco
+* Hugo Sánchez
