@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Advection: River Pollution</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1e272e;
+            color: #d2dae2;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+        h2 { margin-bottom: 5px; color: #4bcffa; }
+        .container {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        canvas {
+            background-color: #0fb9b1; /* Fallback */
+            border: 4px solid #2d3436;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            cursor: crosshair;
+            border-radius: 4px;
+        }
+        .controls {
+            background: #2f3640;
+            padding: 20px;
+            border-radius: 8px;
+            width: 300px;
+            border: 1px solid #353b48;
+        }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 0.9em; color: #d2dae2;}
+        input[type=range] { width: 100%; cursor: pointer; }
+        .value-display { float: right; color: #0be881; }
+        
+        .legend {
+            margin-top: 20px;
+            display: flex;
+            align-items: center;
+            font-size: 0.8em;
+        }
+        .gradient-bar {
+            width: 100%;
+            height: 12px;
+            /* Water blue to Toxic Green */
+            background: linear-gradient(to right, #3498db, #2ecc71, #f1c40f, #e74c3c); 
+            margin-top: 5px;
+            border-radius: 2px;
+        }
+        .info { font-size: 0.8rem; color: #808e9b; margin-top: 10px; line-height: 1.4; border-top: 1px solid #555; padding-top: 10px;}
+        
+        /* Stylized River Banks */
+        .bank-label {
+            position: absolute; 
+            width: 100%; 
+            text-align: center; 
+            font-size: 10px; 
+            color: #2d3436; 
+            font-weight: bold; 
+            letter-spacing: 2px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>Advection concept shown in a river</h2>
+    <p style="color:#aaa; margin-bottom: 20px;">Fernando Blanco and Hugo Sánchez</p>
+
+    <div class="container">
+        <div style="position: relative;">
+            <div style="position: absolute; top: 0; width: 100%; height: 40px; background: repeating-linear-gradient(45deg, #27ae60, #27ae60 10px, #2ecc71 10px, #2ecc71 20px); border-bottom: 3px solid #1e272e; z-index: 2;"></div>
+            
+            <canvas id="simCanvas" width="600" height="400"></canvas>
+            
+            <div style="position: absolute; bottom: 0; width: 100%; height: 40px; background: repeating-linear-gradient(45deg, #27ae60, #27ae60 10px, #2ecc71 10px, #2ecc71 20px); border-top: 3px solid #1e272e; z-index: 2;"></div>
+            
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <label>River flow rate (Max U) <span id="val-u" class="value-display">3.0</span></label>
+                <input type="range" id="slider-u" min="0" max="8" step="0.1" value="3.0">
+            </div>
+
+            <div class="control-group">
+                <label>Cross-current / Turbulence (v) <span id="val-v" class="value-display">0.2</span></label>
+                <input type="range" id="slider-v" min="-2" max="2" step="0.1" value="0.2">
+            </div>
+
+            <div class="control-group">
+                <label>Pollutant discharge rate<span id="val-dens" class="value-display">150</span></label>
+                <input type="range" id="slider-dens" min="0" max="255" step="1" value="150">
+            </div>
+            
+            <div class="control-group">
+                <button onclick="resetSim()" style="padding: 10px 16px; background: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer; width: 100%; font-weight: bold;">Flush River</button>
+            </div>
+
+            <div class="legend">
+                <div style="width: 100%;">
+                    <span>Pollution concentration (PPM):</span>
+                    <div class="gradient-bar"></div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span>Clean</span><span>Toxic</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        const scale = 4; 
+        const width = canvas.width / scale;
+        const height = canvas.height / scale;
+
+        // We define the "Water" area (excluding banks)
+        // The canvas is 400px high. Let's say top 40px and bottom 40px are land.
+        // In simulation grid units:
+        const bankSize = 10; // 10 units * scale 4 = 40px
+        const waterStart = bankSize;
+        const waterEnd = height - bankSize;
+        const waterCenter = (waterStart + waterEnd) / 2;
+        const waterHalfHeight = (waterEnd - waterStart) / 2;
+
+        // --- State Arrays ---
+        let density = new Float32Array(width * height).fill(0);
+        let density_prev = new Float32Array(width * height).fill(0);
+
+        // --- Parameters ---
+        let u_max = 3.0; // Max velocity in center
+        let v_drift = 0.2; 
+        let sourceIntensity = 150;
+        const dt = 1.0;
+        const decay = 0.995; // Slower decay than air, water holds dye longer
+
+        // --- UI Handlers ---
+        const sliderU = document.getElementById('slider-u');
+        const sliderV = document.getElementById('slider-v');
+        const sliderDens = document.getElementById('slider-dens');
+        const valU = document.getElementById('val-u');
+        const valV = document.getElementById('val-v');
+        const valDens = document.getElementById('val-dens');
+
+        sliderU.oninput = function() { u_max = parseFloat(this.value); valU.innerText = u_max.toFixed(1); };
+        sliderV.oninput = function() { v_drift = parseFloat(this.value); valV.innerText = v_drift.toFixed(1); };
+        sliderDens.oninput = function() { sourceIntensity = parseInt(this.value); valDens.innerText = sourceIntensity; };
+
+        function resetSim() {
+            density.fill(0);
+            density_prev.fill(0);
+        }
+
+        // --- Core Physics: Advection with Velocity Profile ---
+        function advect() {
+            for (let y = 0; y < height; y++) {
+                
+                // Calculate River Velocity based on depth (y)
+                // Parabolic profile: u = u_max * (1 - (dist_from_center/radius)^2)
+                let u_local = 0;
+                
+                if (y > waterStart && y < waterEnd) {
+                    let normalizedDist = (y - waterCenter) / waterHalfHeight;
+                    // The 1.0 - dist^2 creates the bell curve shape
+                    u_local = u_max * (1.0 - (normalizedDist * normalizedDist));
+                    if (u_local < 0) u_local = 0; 
+                } else {
+                    u_local = 0; // No flow on land
+                }
+
+                for (let x = 0; x < width; x++) {
+                    // If we are on land, density is 0
+                    if (y <= waterStart || y >= waterEnd) {
+                        density_prev[y * width + x] = 0;
+                        continue;
+                    }
+
+                    // Backtrace
+                    let x_prev = x - u_local * dt;
+                    let y_prev = y - v_drift * dt;
+
+                    // Boundary checks
+                    if (x_prev < 0) x_prev = 0;
+                    if (x_prev > width - 1) x_prev = width - 1;
+                    if (y_prev < waterStart) y_prev = waterStart + 0.1;
+                    if (y_prev > waterEnd) y_prev = waterEnd - 0.1;
+
+                    // Bilinear Interpolation
+                    const x0 = Math.floor(x_prev);
+                    const x1 = x0 + 1;
+                    const y0 = Math.floor(y_prev);
+                    const y1 = y0 + 1;
+                    
+                    const s1 = x_prev - x0;
+                    const s0 = 1 - s1;
+                    const t1 = y_prev - y0;
+                    const t0 = 1 - t1;
+
+                    const i00 = y0 * width + x0;
+                    const i01 = y1 * width + x0;
+                    const i10 = y0 * width + x1;
+                    const i11 = y1 * width + x1;
+
+                    // Safe clamp for array bounds
+                    const maxIdx = density.length - 1;
+                    let d00 = density[Math.min(maxIdx, i00)];
+                    let d01 = density[Math.min(maxIdx, i01)];
+                    let d10 = density[Math.min(maxIdx, i10)];
+                    let d11 = density[Math.min(maxIdx, i11)];
+
+                    const val = s0 * (t0 * d00 + t1 * d01) +
+                                s1 * (t0 * d10 + t1 * d11);
+
+                    density_prev[y * width + x] = val * decay;
+                }
+            }
+
+            let temp = density;
+            density = density_prev;
+            density_prev = temp;
+        }
+
+        function addSource() {
+            // Source is a Drain Pipe on the top bank
+            const sourceX = Math.floor(width * 0.15); 
+            const sourceY = waterStart + 2; // Just inside the water
+            const radius = 2;
+
+            for(let y = -radius; y <= radius; y++) {
+                for(let x = -radius; x <= radius; x++) {
+                    if (x*x + y*y <= radius*radius) {
+                        const idx = (sourceY + y) * width + (sourceX + x);
+                        if(idx >= 0 && idx < density.length) {
+                            density[idx] = Math.min(255, density[idx] + sourceIntensity); 
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Rendering ---
+        const imgData = ctx.createImageData(width * scale, height * scale);
+
+        function draw() {
+            const data = imgData.data;
+            
+            // Water Base Color (RGB)
+            const wR = 52, wG = 152, wB = 219; // Nice River Blue
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let r, g, b;
+
+                    if (y <= waterStart || y >= waterEnd) {
+                        // Land Area (Simple dark color behind the CSS overlay)
+                        r = 30; g = 39; b = 46; 
+                    } else {
+                        // Water Area
+                        const dVal = density[y * width + x];
+                        const saturation = Math.min(1.0, dVal / 200); // 0 to 1 based on density
+
+                        // Mix Water Color with Pollutant Color
+                        // Pollutant moves from Green -> Yellow -> Red
+                        // Simple lerp:
+                        const pR = 231, pG = 76, pB = 60; // Toxic Red
+                        
+                        // If high density, turn green/yellow/red, else remain blue
+                        // Let's do a simple accumulation mix
+                        if (dVal < 5) {
+                            r = wR; g = wG; b = wB;
+                        } else {
+                            // Heatmap-ish logic mixing with water
+                            r = wR + (255 - wR) * saturation;
+                            g = wG + (255 - wG) * (saturation * 0.5); // Less green for red tint
+                            b = wB * (1 - saturation); // Remove blue
+                        }
+                    }
+
+                    // Fill the scaled block
+                    for (let dy = 0; dy < scale; dy++) {
+                        for (let dx = 0; dx < scale; dx++) {
+                            const pxIndex = ((y * scale + dy) * (width * scale) + (x * scale + dx)) * 4;
+                            data[pxIndex] = r;
+                            data[pxIndex + 1] = g;
+                            data[pxIndex + 2] = b;
+                            data[pxIndex + 3] = 255; 
+                        }
+                    }
+                }
+            }
+            
+            ctx.putImageData(imgData, 0, 0);
+
+            // Draw the Pipe
+            const sX = Math.floor(width * 0.15) * scale;
+            const sY = waterStart * scale;
+            
+            ctx.fillStyle = "#95a5a6"; // Pipe Grey
+            ctx.strokeStyle = "#2c3e50";
+            ctx.lineWidth = 2;
+            // Pipe protruding from bank
+            ctx.fillRect(sX - 10, 0, 20, sY + 10); 
+            ctx.strokeRect(sX - 10, -2, 20, sY + 12);
+        }
+
+        function loop() {
+            addSource();
+            advect();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        loop();
+
+    </script>
+</body>
+</html>
